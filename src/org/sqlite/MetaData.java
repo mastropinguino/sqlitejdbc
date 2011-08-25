@@ -17,15 +17,45 @@
 package org.sqlite;
 
 import java.sql.*;
+import java.util.Hashtable;
 
 class MetaData implements DatabaseMetaData
 {
+        private static String sqlQuote(String str) {
+                if (str == null) {
+                        return "NULL";
+                }
+                int i, single = 0, dbl = 0;
+                for (i = 0; i < str.length(); i++) {
+                        if (str.charAt(i) == '\'') {
+                                single++;
+                        } else if (str.charAt(i) == '"') {
+                                dbl++;
+                        }
+                }
+                if (single == 0) {
+                        return "'" + str + "'";
+                }
+                if (dbl == 0) {
+                        return "\"" + str + "\"";
+                }
+                StringBuffer sb = new StringBuffer("'");
+                for (i = 0; i < str.length(); i++) {
+                        char c = str.charAt(i);
+                        if (c == '\'') {
+                                sb.append("''");
+                        } else {
+                                sb.append(c);
+                        }
+                }
+                return sb.toString();
+        }
+        
     private Conn conn;
     private PreparedStatement
         getTables = null,
         getTableTypes = null,
         getTypeInfo = null,
-        getCrossReference = null,
         getCatalogs = null,
         getSchemas = null,
         getUDTs = null,
@@ -39,7 +69,8 @@ class MetaData implements DatabaseMetaData
         getAttributes = null,
         getBestRowIdentifier = null,
         getVersionColumns = null,
-        getColumnPrivileges = null;
+        getColumnPrivileges = null,
+        getIndexInfo = null;
 
     /** Used by PrepStmt to save generating a new statement every call. */
     private PreparedStatement getGeneratedKeys = null;
@@ -56,7 +87,6 @@ class MetaData implements DatabaseMetaData
             if (getTables != null) getTables.close();
             if (getTableTypes != null) getTableTypes.close();
             if (getTypeInfo != null) getTypeInfo.close();
-            if (getCrossReference != null) getCrossReference.close();
             if (getCatalogs != null) getCatalogs.close();
             if (getSchemas != null) getSchemas.close();
             if (getUDTs != null) getUDTs.close();
@@ -76,7 +106,6 @@ class MetaData implements DatabaseMetaData
             getTables = null;
             getTableTypes = null;
             getTypeInfo = null;
-            getCrossReference = null;
             getCatalogs = null;
             getSchemas = null;
             getUDTs = null;
@@ -407,29 +436,100 @@ class MetaData implements DatabaseMetaData
         return stat.executeQuery(sql);
     }
 
-    public ResultSet getCrossReference(String pc, String ps, String pt,
-                                       String fc, String fs, String ft)
+    public ResultSet getCrossReference(String primaryCatalog,
+                        String primarySchema, String primaryTable, String foreignCatalog,
+                        String foreignSchema, String foreignTable)
             throws SQLException {
-        if (getCrossReference == null)
-            getCrossReference = conn.prepareStatement("select "
+        
+        StringBuilder sql = new StringBuilder();
+        ResultSet rs;
+        Statement stat = conn.createStatement();
+
+        try {
+                rs = stat.executeQuery("pragma foreign_key_list('"+escape(foreignTable)+"');");
+        }
+        catch(SQLException ex) {
+                rs = null;
+        }
+
+        sql.append("select "
                 + "null as PKTABLE_CAT, "
-                + "null as PKTABLE_SCHEM, "
-                + "null as PKTABLE_NAME, "
-                + "null as PKCOLUMN_NAME, "
-                + "null as FKTABLE_CAT, "
-                + "null as FKTABLE_SCHEM, "
-                + "null as FKTABLE_NAME, "
-                + "null as FKCOLUMN_NAME, "
-                + "null as KEY_SEQ, "
-                + "null as UPDATE_RULE, "
-                + "null as DELETE_RULE, "
-                + "null as FK_NAME, "
-                + "null as PK_NAME, "
-                + "null as DEFERRABILITY "
-                + "limit 0;");
-        getCrossReference.clearParameters();
-        return getCrossReference.executeQuery();
+            + "null as PKTABLE_SCHEM, "
+            + "PKTABLE_NAME, "
+            + "PKCOLUMN_NAME, "
+            + "null as FKTABLE_CAT, "
+            + "null as FKTABLE_SCHEM, "
+            + "'" + escape(foreignTable) + "' as FKTABLE_NAME, "
+            + "FKCOLUMN_NAME, "
+            + "KEY_SEQ, "
+            + "UPDATE_RULE, "
+            + "DELETE_RULE, "
+            + "null as FK_NAME, "
+            + "null as PK_NAME, "
+            + "7 as DEFERRABILITY ");
+
+        if (primaryTable == null)
+                primaryTable = "";
+        int i = 0;
+        sql.append(" from ( ");
+        if ( rs == null || !rs.next()) {
+                sql.append("  select ");
+            sql.append("        null AS PKTABLE_NAME,");
+            sql.append("        null AS PKCOLUMN_NAME,");
+            sql.append("        null AS FKCOLUMN_NAME,");
+            sql.append("        null AS KEY_SEQ,");
+            sql.append("        null AS UPDATE_RULE,");
+            sql.append("        null AS DELETE_RULE ");
+                sql.append(" ) limit 0");
+        }
+        else {
+                do {
+                    String pktable = rs.getString("table");
+                    if (primaryTable.equalsIgnoreCase(pktable)) {
+                        continue;
+                    }
+        
+                    String pkcolumn = rs.getString("to");
+                    String fkcolumn = rs.getString("from");
+                    String updateRule = "RESTRICT";
+                    String deleteRule = "RESTRICT";
+                    String seq = rs.getString("seq");
+                                
+                    updateRule = getDbRuleCode(updateRule);
+                    deleteRule = getDbRuleCode(deleteRule);
+                                
+                    if (fkcolumn == null || fkcolumn.length() == 0)
+                        fkcolumn = pkcolumn;
+                    
+                    if (i > 0) 
+                        sql.append(" union all ");
+        
+                    sql.append("select ");
+                    sql.append(sqlQuote(pktable)+" AS PKTABLE_NAME,");
+                    sql.append(sqlQuote(pkcolumn)+" AS PKCOLUMN_NAME,");
+                    sql.append(sqlQuote(fkcolumn)+" AS FKCOLUMN_NAME,");
+                    sql.append(((Integer.valueOf(seq)).intValue() + 1)+" AS KEY_SEQ,");
+                    sql.append(updateRule+" AS UPDATE_RULE,");
+                    sql.append(deleteRule+" AS DELETE_RULE ");
+                    i++;
+                } while( rs.next());
+                sql.append(")");
+        }
+        System.out.println(sql.toString());
+        
+        return stat.executeQuery(sql.toString());
     }
+
+        private String getDbRuleCode(String dbRule) {
+                if (dbRule.equals("CASCADE"))
+                        dbRule = Integer.toString(DatabaseMetaData.importedKeyCascade);
+                else
+                if (dbRule.equals("SETNULL"))
+                        dbRule = Integer.toString(DatabaseMetaData.importedKeySetNull);
+                else
+                        dbRule =Integer.toString(DatabaseMetaData.importedKeyRestrict);
+                return dbRule;
+        }
 
     public ResultSet getSchemas() throws SQLException {
         if (getSchemas == null) getSchemas = conn.prepareStatement("select "
@@ -500,10 +600,30 @@ class MetaData implements DatabaseMetaData
     }
 
     public ResultSet getImportedKeys(String c, String s, String t)
-        throws SQLException { throw new SQLException("not yet implemented"); }
+        throws SQLException { 
+        return getCrossReference(null,null,null,c,s,t);
+    }
     public ResultSet getIndexInfo(String c, String s, String t,
-                                  boolean u, boolean approximate)
-        throws SQLException { throw new SQLException("not yet implemented"); }
+                                  boolean u, boolean approximate) 
+        throws SQLException {
+        if (getIndexInfo == null) getIndexInfo =
+                conn.prepareStatement(
+                    "select "
+                                + "null as TABLE_CAT,"
+                                + "null as TABLE_SCHEM,"
+                                + "null as TABLE_NAME,"
+                                + "null as NON_UNIQUE,"
+                                + "null as INDEX_QUALIFIER,"
+                                + "null as INDEX_NAME,"
+                                + "null as TYPE,"
+                                + "null as ORDINAL_POSITION,"
+                                + "null as COLUMN_NAME,"
+                                + "null as ASC_OR_DESC,"
+                                + "null as CARDINALITY,"
+                                + "null as PAGES,"
+                                + "null as FILTER_CONDITION limit 0;");
+        return getIndexInfo.executeQuery(); 
+    }
     public ResultSet getProcedureColumns(String c, String s, String p,
                                          String colPat)
             throws SQLException {
@@ -715,4 +835,22 @@ class MetaData implements DatabaseMetaData
     public ResultSet getFunctionColumns(String a, String b, String c,
                 String d) throws SQLException {
         throw new SQLException("Not yet implemented by SQLite JDBC driver"); }
+        
+        
+    public ResultSet getFunctions(String a, String b, String c) throws SQLException {
+        throw new SQLException("Not yet implemented by SQLite JDBC driver"); }        
+    public ResultSet getClientInfoProperties()  throws SQLException {
+        throw new SQLException("Not yet implemented by SQLite JDBC driver"); }        
+    public boolean autoCommitFailureClosesAllResultSets() throws SQLException {
+        throw new SQLException("Not yet implemented by SQLite JDBC driver"); }        
+    public boolean supportsStoredFunctionsUsingCallSyntax()        throws SQLException {
+        throw new SQLException("Not yet implemented by SQLite JDBC driver"); }        
+    public ResultSet getSchemas(String a, String b) throws SQLException {
+        throw new SQLException("Not yet implemented by SQLite JDBC driver"); }        
+    public RowIdLifetime getRowIdLifetime()throws SQLException {
+        throw new SQLException("Not yet implemented by SQLite JDBC driver"); }  
+    public boolean isWrapperFor(Class<?> iface) throws SQLException {
+        throw new SQLException("Not yet implemented by SQLite JDBC driver"); }  
+    public <T> T unwrap(Class<T> iface) throws SQLException {
+        throw new SQLException("Not yet implemented by SQLite JDBC driver"); }  
 }
